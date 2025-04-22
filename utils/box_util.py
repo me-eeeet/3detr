@@ -234,6 +234,39 @@ def roty_batch(t):
     return output
 
 
+def rotz_batch(t):
+    """Rotation about the z-axis.
+    t: (x1,x2,...xn)
+    return: (x1,x2,...,xn,3,3)
+    """
+    input_shape = t.shape
+    output = np.zeros(tuple(list(input_shape) + [3, 3]))
+    c = np.cos(t)
+    s = np.sin(t)
+    output[..., 0, 0] = c
+    output[..., 0, 1] = -s
+    output[..., 1, 0] = s
+    output[..., 1, 1] = c
+    output[..., 2, 2] = 1
+    return output
+
+
+def rotz_batch_tensor(t):
+    """Batch rotation about the z-axis."""
+    input_shape = t.shape
+    output = torch.zeros(
+        tuple(list(input_shape) + [3, 3]), dtype=torch.float32, device=t.device
+    )
+    c = torch.cos(t)
+    s = torch.sin(t)
+    output[..., 0, 0] = c
+    output[..., 0, 1] = -s
+    output[..., 1, 0] = s
+    output[..., 1, 1] = c
+    output[..., 2, 2] = 1
+    return output
+
+
 def get_3d_box(box_size, heading_angle, center):
     """box_size is array(l,w,h), heading_angle is radius clockwise from pos x axis, center is xyz of box center
     output (8,3) array for 3D box cornders
