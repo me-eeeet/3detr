@@ -89,13 +89,75 @@ class Calibration:
         return np.dot(self.cart2hom(points_3d), np.transpose(self.C2V))
     
     def project_rect_to_velo(self, points_3d: np.ndarray) -> np.ndarray:
-        """Project points from rectified camera space to velodyne space.
+        """Project points from rectified image space to velodyne space.
 
         Args:
-            points_3d (np.ndarray): 3D points in rectified camera space
+            points_3d (np.ndarray): 3D points in rectified image space
 
         Returns:
             np.ndarray: 3D Points in velodyne space
         """
         points_3d = self.project_rect_to_ref(points_3d=points_3d)
         return self.project_ref_to_velo(points_3d=points_3d)
+    
+    def project_ref_to_rect(self, points_3d: np.ndarray) -> np.ndarray:
+        """Project points from reference camera space to rectified image space.
+
+        Args:
+            points_3d (np.ndarray): 3D points in reference camera space
+
+        Returns:
+            np.ndarray: 3D Points in rectified image space
+        """
+        return np.transpose(np.dot(self.R0, np.transpose(points_3d)))
+    
+    def project_velo_to_ref(self, points_3d: np.ndarray) -> np.ndarray:
+        """Project points from velodyne space to reference camera space.
+
+        Args:
+            points_3d (np.ndarray): 3D points in velodyne space
+
+        Returns:
+            np.ndarray: 3D Points in refernce camera space
+        """
+        points_3d = self.cart2hom(points_3d)  # nx4
+        return np.dot(points_3d, np.transpose(self.V2C))
+    
+    def project_velo_to_rect(self, points_3d: np.ndarray) -> np.ndarray:
+        """Project points from velodyne space to rectified image space.
+
+        Args:
+            points_3d (np.ndarray): 3D points in velodyne space
+
+        Returns:
+            np.ndarray: 3D Points in rectified image space
+        """
+        points_3d = self.project_velo_to_ref(points_3d)
+        return self.project_ref_to_rect(points_3d)
+    
+    def project_rect_to_image(self, points_3d: np.ndarray) -> np.ndarray:
+        """Project points from rectified image space to image space.
+
+        Args:
+            points_3d (np.ndarray): 3D points in rectified image space
+
+        Returns:
+            np.ndarray: 2D Points in image_2 space
+        """
+        points_3d = self.cart2hom(points_3d)
+        points_3d = np.dot(points_3d, np.transpose(self.P))  # nx3
+        points_3d[:, 0] /= points_3d[:, 2]
+        points_3d[:, 1] /= points_3d[:, 2]
+        return points_3d[:, 0:2]
+    
+    def project_velo_to_image(self, points_3d: np.ndarray) -> np.ndarray:
+        """Project points from velodyne space to image.
+
+        Args:
+            points_3d (np.ndarray): 3D points in velodyne space
+
+        Returns:
+            np.ndarray: 2D Points in image_2 space
+        """
+        points_3d = self.project_velo_to_rect(points_3d)
+        return self.project_rect_to_image(points_3d)

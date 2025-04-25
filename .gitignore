@@ -12,3 +12,7 @@ outputs/
 
 *env/
 weights/
+
+checkpoints*/
+predictions*/
+runs/

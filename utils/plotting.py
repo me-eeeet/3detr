@@ -13,7 +13,17 @@ COLOR_MAP = {
     "Cyclist": "#9467bd",         # Purple
     "Tram": "#7f7f7f",            # Gray
     "Misc": "#e377c2",            # Pink
-    "DontCare": "#d62728"         # (Muted Red – optional, or change)
+    "DontCare": "#d62728",         # (Muted Red – optional, or change)
+
+    "Car_P": "#00bfff",            # Bright Sky Blue
+    "Van_P": "#00ffff",            # Aqua
+    "Truck_P": "#00ff00",          # Lime Green
+    "Pedestrian_P": "#ffff00",     # Yellow
+    "Person_sitting_P": "#ff8c00", # Dark Orange
+    "Cyclist_P": "#da70d6",        # Orchid
+    "Tram_P": "#c0c0c0",           # Silver
+    "Misc_P": "#ff69b4",           # Hot Pink
+    "DontCare_P": "#ff4500"        # Orange Red
 }
 
 
@@ -59,7 +69,7 @@ def plot_point_cloud(data: np.ndarray, fig: go.Figure) -> None:
     )
 
 
-def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure) -> None:
+def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: str = "") -> None:
     """Plot 3D Bounding Box.
 
     Args:
@@ -86,7 +96,7 @@ def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure) -> None:
                     color=COLOR_MAP[name],
                     width=3,
                 ),
-                hovertext=[name],
+                hovertext=[name, extra_text],
                 hoverinfo="text",
                 hoverlabel=dict(
                     font=dict(size=20, color=COLOR_MAP[name]),

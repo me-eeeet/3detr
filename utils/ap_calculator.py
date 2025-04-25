@@ -9,6 +9,8 @@ import logging
 import os
 import sys
 from collections import OrderedDict
+from pathlib import Path
+from tqdm.autonotebook import tqdm
 
 import numpy as np
 import scipy.special as scipy_special
@@ -75,7 +77,7 @@ def parse_predictions(
             pc = batch_pc[i, :, :]  # (N,3)
             for j in range(K):
                 box3d = pred_corners_3d_upright_camera[i, j, :, :]  # (8,3)
-                box3d = flip_axis_to_depth(box3d)
+                # box3d = flip_axis_to_depth(box3d)
                 pc_in_box, inds = extract_pc_in_box3d(pc, box3d)
                 if len(pc_in_box) < 5:
                     nonempty_box_mask[i, j] = 0
@@ -244,8 +246,8 @@ def get_ap_config_dict(
     nms_iou=0.25,
     use_old_type_nms=False,
     cls_nms=True,
-    per_class_proposal=True,
-    use_cls_confidence_only=False,
+    per_class_proposal=False,
+    use_cls_confidence_only=True,
     conf_thresh=0.05,
     no_nms=False,
     dataset_config=None,
@@ -366,6 +368,23 @@ class APCalculator(object):
             self.gt_map_cls[self.scan_cnt] = batch_gt_map_cls[i]
             self.pred_map_cls[self.scan_cnt] = batch_pred_map_cls[i]
             self.scan_cnt += 1
+
+    def save_predictions(self, output_dir: str) -> None:
+        output_dir: Path = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for idx in tqdm(self.pred_map_cls):
+            n = len(self.pred_map_cls[idx])
+            output = {
+                "ids": np.zeros((n,), dtype=np.uint32),
+                "corners": np.zeros((n, 8, 3), dtype=np.float32),
+                "scores": np.zeros((n,), dtype=np.float32),
+
+            }
+            for jdx, (id, corners, score) in enumerate(self.pred_map_cls[idx]):
+                output["ids"][jdx] = id
+                output["corners"][jdx] = corners
+                output["scores"][jdx] = score
+            np.save(str(output_dir / f"{idx}.npy"), output)
 
     def compute_metrics(self):
         """Use accumulated predictions and groundtruths to compute Average Precision."""

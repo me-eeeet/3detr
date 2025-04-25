@@ -29,7 +29,9 @@ class KITTIDatasetConfig(object):
             'Cyclist': 5,
             'Tram': 6, 
             'Misc': 7,
-            'DontCare': 8,
+        }
+        self.ignored_semcls = {
+            "DontCare": 8,
         }
         self.num_semcls = len(self.type2class)
         self.class2type = {self.type2class[t]: t for t in self.type2class}
@@ -132,10 +134,10 @@ class KITTIDatasetConfig(object):
             (w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2), -1
         )
         corners_3d[..., :, 1] = torch.cat(
-            (l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2), -1
+            (-l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2), -1
         )
         corners_3d[..., :, 2] = torch.cat(
-            (h / 2, h / 2, h / 2, h / 2, -h / 2, -h / 2, -h / 2, -h / 2), -1
+            (-h / 2, -h / 2, -h / 2, -h / 2, h / 2, h / 2, h / 2, h / 2), -1
         )
         tlist = [i for i in range(len(input_shape))]
         tlist += [len(input_shape) + 1, len(input_shape)]
@@ -156,16 +158,28 @@ class KITTIDatasetConfig(object):
             (w / 2, -w / 2, -w / 2, w / 2, w / 2, -w / 2, -w / 2, w / 2), -1
         )
         corners_3d[..., :, 1] = np.concatenate(
-            (l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2), -1
+            (-l / 2, -l / 2, l / 2, l / 2, -l / 2, -l / 2, l / 2, l / 2), -1
         )
         corners_3d[..., :, 2] = np.concatenate(
-            (h / 2, h / 2, h / 2, h / 2, -h / 2, -h / 2, -h / 2, -h / 2), -1
+            (-h / 2, -h / 2, -h / 2, -h / 2, h / 2, h / 2, h / 2, h / 2), -1
         )
         tlist = [i for i in range(len(input_shape))]
         tlist += [len(input_shape) + 1, len(input_shape)]
         corners_3d = np.matmul(corners_3d, np.transpose(R, tuple(tlist)))
         corners_3d += np.expand_dims(centers, -2)
         return corners_3d
+    
+    def my_compute_box_3d(self, center, size, angle):
+        R = pc_util.rotz(angle)
+        w, l, h = size / 2
+        x_corners = [w, -w, -w, w, w, -w, -w, w]
+        y_corners = [-l, -l, l, l, -l, -l, l, l]
+        z_corners = [-h, -h, -h, -h, h, h, h, h]
+        corners_3d = np.dot(R, np.vstack([x_corners, y_corners, z_corners]))
+        corners_3d[0, :] += center[0]
+        corners_3d[1, :] += center[1]
+        corners_3d[2, :] += center[2]
+        return np.transpose(corners_3d)
 
 
 class KITTIDetectionDataset(Dataset):
@@ -214,7 +228,7 @@ class KITTIDetectionDataset(Dataset):
 
     def __len__(self) -> int:
         """Return length of the data."""
-        return len(self.filenames)
+        return int(len(self.filenames) * 1.0)
 
     def _read_calibration(self, name: str) -> Calibration:
         """Read Calibration Data.
@@ -255,7 +269,9 @@ class KITTIDetectionDataset(Dataset):
                 try:
                     line = line.rstrip()
                     if len(line):
-                        objects.append(Object3D(line=line))
+                        object3d = Object3D(line=line)
+                        if object3d.name not in self.dataset_config.ignored_semcls:
+                            objects.append(object3d)
                 except Exception as ex:
                     error_str = "".join(
                         traceback.format_exception(None, ex, ex.__traceback__))
@@ -275,12 +291,24 @@ class KITTIDetectionDataset(Dataset):
         """
         return np.fromfile(str(self.velodyne_dir / f"{name}.bin"),
                            dtype=np.float32).reshape((-1, 4))
+    
+    def _read_bboxes(self, name: str) -> np.ndarray:
+        """Read the processes BBoxes in Velodyne space.
 
-    def _read_data(self, idx: int) -> dict:
+        Args:
+            name (str): Name of the file
+
+        Returns:
+            np.ndarray: BBoxes
+        """
+        return np.load(self.bboxes_dir / f"{name}.npy")
+
+    def _read_data(self, idx: int, raw: bool = False) -> dict:
         """Read KITTI datapoint.
 
         Args:
             idx (int): Index of the file
+            raw (bool): Whether to read raw data or processed
 
         Returns:
             dict: KITTI Data point 
@@ -289,10 +317,10 @@ class KITTIDetectionDataset(Dataset):
             self.filenames
         ), f"index out of range {idx} >= {len(self.filenames)}"
         name = self.filenames[idx]
-        # print(f"Data Filename: {name}")
         return {
             "calibration": self._read_calibration(name=name),
-            "objects": self._read_label(name=name),
+            "objects": self._read_label(name=name) if raw else None,
+            "bboxes": self._read_bboxes(name=name) if not raw else None,
             "lidar": self._read_lidar_data(name=name),
         }
     
@@ -310,16 +338,36 @@ class KITTIDetectionDataset(Dataset):
         points_3d_velo = calibration.project_rect_to_velo(points_3d=points_3d_rect)
         return points_3d_velo
     
+    def _filter_fov_points(self, points_3d: np.ndarray, calibration: Calibration) -> np.ndarray:
+        """Filter out points outside of Image FOV.
+
+        Args:
+            points_3d (np.ndarray): 3D Point cloud points
+
+        Returns:
+            np.ndarray: Filtered Point cloud points
+        """
+        xmin, xmax, ymin, ymax = 0, 1242, 0, 375
+        clip_distance = 2
+        points_2d = calibration.project_velo_to_image(points_3d=points_3d)
+        index = (
+            (points_2d[:, 0] < xmax)
+            & (points_2d[:, 0] >= xmin)
+            & (points_2d[:, 1] < ymax)
+            & (points_2d[:, 1] >= ymin)
+            & (points_3d[:, 0] > clip_distance)
+        )
+        return points_3d[index]
+    
     def __getitem__(self, index: int):
         
         # read data from files
         data = self._read_data(idx=index)
         
-        # filter unnecessary objects
-        # print(f"N-Objects (before filtering): {len(data['objects'])}")
-        data["objects"] = list(filter(lambda o: o.name in {"DontCare"}, data["objects"]))
-        n_bboxes = len(data["objects"])
-        # print(f"N-Objects (after filtering): {n_bboxes}")
+        # filter unnecessary bboxes
+        bboxes: np.ndarray = data["bboxes"]
+        bboxes = bboxes[~np.isin(bboxes[:, 7], list(self.dataset_config.ignored_semcls.values()))]
+        n_bboxes = bboxes.shape[0]
         
         # ------------------------------- LABELS ------------------------------
         box_centers = np.zeros((self.max_num_obj, 3))
@@ -332,19 +380,12 @@ class KITTIDetectionDataset(Dataset):
         target_bboxes_mask[:n_bboxes] = 1
 
         for i in range(n_bboxes):
-            # print("="*50)
-            object3d: Object3D = data["objects"][i]
-            # print(f"Processing: {object3d.name}")
-            target_bboxes_semcls[i] = self.dataset_config.type2class[object3d.name]
-            raw_angles[i] = -object3d.ry
-            raw_sizes[i, :] = [object3d.w, object3d.l, object3d.h]
-            angle_classes[i], angle_residuals[i] = self.dataset_config.angle2class(raw_angles[i])
-            # print(f"Angle Transformation: raw {object3d.ry}, Class {angle_classes[i]}, Residual {angle_residuals[i]}")
-            corners_3d = self._preprocess_3d_object(object=object3d, calibration=data["calibration"])
-            # print(f"Width: {np.linalg.norm(corners_3d[0] - corners_3d[1])}")
-            # print(f"Length: {np.linalg.norm(corners_3d[1] - corners_3d[2])}")
-            # print(f"Height: {np.linalg.norm(corners_3d[0] - corners_3d[4])}")
-            # print(f"Raw Sizes: {raw_sizes[i]}")
+            bbox = bboxes[i]
+            target_bboxes_semcls[i] = bbox[7]
+            raw_angles[i] = bbox[6]
+            raw_sizes[i, :] = bbox[3:6]
+            angle_classes[i], angle_residuals[i] = self.dataset_config.angle2class(bbox[6])
+            corners_3d = self.dataset_config.my_compute_box_3d(bbox[:3], bbox[3:6], bbox[6])
             # compute axis aligned box
             xmin = np.min(corners_3d[:, 0])
             ymin = np.min(corners_3d[:, 1])
@@ -360,28 +401,25 @@ class KITTIDetectionDataset(Dataset):
                 ]
             )
 
+        # Filter out points outside of the FOV
+        point_cloud = self._filter_fov_points(points_3d=data["lidar"][:, :3], calibration=data["calibration"])
+
         # Randomly sample point clound points
-        # print(f"Num of points (before sampling): {len(data['lidar'])}")
         point_cloud = pc_util.random_sampling(
-            data["lidar"], self.num_points if self.num_points > 0 else len(data["lidar"]), return_choices=False
+            point_cloud, self.num_points if self.num_points > 0 else len(point_cloud), return_choices=False
         )[:, :3]
-        # print(f"Num of points (after sampling): {len(point_cloud)}")
 
         # Normalize the boxes (Size & Center)
         point_cloud_dims_min = point_cloud.min(axis=0)
         point_cloud_dims_max = point_cloud.max(axis=0)
-        # print(f"Point Cloud Min-Max: {point_cloud_dims_min} - {point_cloud_dims_max}")
 
-        # print(f"Box sizes (before normalizing): {raw_sizes[:n_bboxes]}")
         mult_factor = point_cloud_dims_max - point_cloud_dims_min
         box_sizes_normalized = pc_util.scale_points(
             raw_sizes.astype(np.float32)[None, ...],
             mult_factor=1.0 / mult_factor[None, ...],
         )
         box_sizes_normalized = box_sizes_normalized.squeeze(0)
-        # print(f"Box sizes (after normalizing): {box_sizes_normalized[:n_bboxes]}")
 
-        # print(f"Box Centers (before normalizing): {box_centers[:n_bboxes]}")
         box_centers_normalized = pc_util.shift_scale_points(
             box_centers[None, ...],
             src_range=[
@@ -392,16 +430,13 @@ class KITTIDetectionDataset(Dataset):
         )
         box_centers_normalized = box_centers_normalized.squeeze(0)
         box_centers_normalized = box_centers_normalized * target_bboxes_mask[..., None]
-        # print(f"Box Centers (after normalizing): {box_centers_normalized[:n_bboxes]}")
 
         # re-encode angles to be consistent with VoteNet eval
-        # print(f"Raw Angles (before encoding): {raw_angles[:n_bboxes]}")
         angle_classes = angle_classes.astype(np.int64)
         angle_residuals = angle_residuals.astype(np.float32)
         raw_angles = self.dataset_config.class2angle_batch(
             angle_classes, angle_residuals
         )
-        # print(f"Raw Angles (after encoding): {raw_angles[:n_bboxes]}")
 
         # Calculate the box corners in Velodyne Space (To verify GT sizes and angles)
         box_corners = self.dataset_config.box_parametrization_to_corners_np(
@@ -456,7 +491,7 @@ class KITTIDetectionDataset(Dataset):
         self.bboxes_dir.mkdir(parents=True, exist_ok=True)
         # iterate and save the 
         for index, filename in tqdm(enumerate(self.filenames)):
-            data = self._read_data(idx=index)
+            data = self._read_data(idx=index, raw=True)
             # BBoxes format - cx, cy, cz, sx, sy, sz, rz, cls
             bboxes = np.zeros((len(data["objects"]), 8), dtype=np.float32)
             object3d: Object3D

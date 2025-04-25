@@ -141,7 +141,32 @@ def make_args_parser():
     parser.add_argument("--ngpus", default=1, type=int)
     parser.add_argument("--dist_url", default="tcp://localhost:12345", type=str)
 
+    ##### Finetuning #####
+    parser.add_argument("--finetune", default=False, action="store_true")
+    parser.add_argument("--finetune_weights", default=None, type=str)
+
+    ##### Save Prediction #####
+    parser.add_argument("--save_predictions", default=False, action="store_true")
+    parser.add_argument("--predictions_path", default="predictions", type=str)
+
     return parser
+
+
+def build_finetuning_model(args, dataset_config):
+    from datasets import SunrgbdDatasetConfig
+    from models.model_3detr import BoxProcessor
+    # build model
+    model, processor = build_model(args, SunrgbdDatasetConfig())
+    # load saved weights
+    sd = torch.load(args.finetune_weights, map_location=torch.device("cpu"), weights_only=False)
+    model.load_state_dict(sd["model"])
+    # freeze all layers
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+    # Update the MLP Head & Box Processor
+    model.build_mlp_heads(dataset_config=dataset_config, decoder_dim=args.dec_dim, mlp_dropout=args.mlp_dropout)
+    model.box_processor = BoxProcessor(dataset_config)
+    return model, processor
 
 
 def do_train(
@@ -306,7 +331,7 @@ def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders
         f"Please specify a test checkpoint using --test_ckpt. Found invalid value {args.test_ckpt}"
         sys.exit(1)
 
-    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"))
+    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"), weights_only=False)
     model_no_ddp.load_state_dict(sd["model"])
     logger = Logger()
     criterion = None  # do not compute loss for speed-up; Comment out to see test loss
@@ -322,6 +347,10 @@ def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders
         logger,
         curr_iter,
     )
+    # Save the predictions in .npy
+    if args.save_predictions:
+        print("Saving Predictions....")
+        ap_calculator.save_predictions(output_dir=args.predictions_path)
     metrics = ap_calculator.compute_metrics()
     metric_str = ap_calculator.metrics_to_str(metrics)
     if is_primary():
@@ -352,7 +381,10 @@ def main(local_rank, args):
         torch.cuda.manual_seed_all(args.seed + get_rank())
 
     datasets, dataset_config = build_dataset(args)
-    model, _ = build_model(args, dataset_config)
+    if args.finetune:
+        model, _ = build_finetuning_model(args, dataset_config)
+    else:
+        model, _ = build_model(args, dataset_config)
     model = model.cuda(local_rank)
     model_no_ddp = model
 
