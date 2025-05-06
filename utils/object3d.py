@@ -28,6 +28,8 @@ class Object3D:
         self.h, self.w, self.l = values[8:11]
         self.t = tuple(values[11:14])
         self.ry = values[14]
+        # Difficulty
+        self.difficulty = -1
 
     def get_3d_bbox(self) -> np.ndarray:
         """Return 3D BBox in rectified image coordinate space.

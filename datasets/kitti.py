@@ -15,6 +15,7 @@ from utils.object3d import Object3D
 from utils.plotting import get_figure, plot_point_cloud, plot_3d_bbox
 import utils.pc_util as pc_util
 from utils.box_util import rotz_batch, rotz_batch_tensor
+from utils.augmentor import PointAugmentor
 
 
 class KITTIDatasetConfig(object):
@@ -189,6 +190,7 @@ class KITTIDetectionDataset(Dataset):
         dataset_config: KITTIDatasetConfig,
         split_set: str = "train",
         root_dir: str = None,
+        radius: float = 15,
         num_points: int = 20000,
         augment: bool = False,
         use_random_cuboid: bool = True,
@@ -202,10 +204,12 @@ class KITTIDetectionDataset(Dataset):
         split_dir = "testing" if split_set in {"test"} else "training"
 
         self.dataset_config = dataset_config
+        self.radius = radius
         self.num_points = num_points
         self.augment = augment
         self.use_random_cuboid = use_random_cuboid
         self.random_cuboid_min_points = random_cuboid_min_points
+        self.augmentor = PointAugmentor()
         
         # load filenames
         with open(str(Path(root_dir) / "sets" / f"{split_set}.txt")) as file:
@@ -348,7 +352,7 @@ class KITTIDetectionDataset(Dataset):
             np.ndarray: Filtered Point cloud points
         """
         xmin, xmax, ymin, ymax = 0, 1242, 0, 375
-        clip_distance = 2
+        clip_distance = 0
         points_2d = calibration.project_velo_to_image(points_3d=points_3d)
         index = (
             (points_2d[:, 0] < xmax)
@@ -359,15 +363,57 @@ class KITTIDetectionDataset(Dataset):
         )
         return points_3d[index]
     
+    def _add_difficulty(self, objects: list[Object3D]) -> list[Object3D]:
+        min_height = [40, 25, 25]  # minimum height for evaluated groundtruth/detections
+        max_occlusion = [0, 1, 2]  # maximum occlusion level of the groundtruth used for evaluation
+        max_trunc = [0.15, 0.3, 0.5]  # maximum truncation level of the groundtruth used for evaluation
+        n_objects = len(objects)
+        easy_mask = np.ones((n_objects, ), dtype=np.bool)
+        moderate_mask = np.ones((n_objects, ), dtype=np.bool)
+        hard_mask = np.ones((n_objects, ), dtype=np.bool)
+        for idx, object3d in enumerate(objects):
+            o, h, t = object3d.occlusion, object3d.box2d[3] - object3d.box2d[1], object3d.truncation
+            if o > max_occlusion[0] or h <= min_height[0] or t > max_trunc[0]:
+                easy_mask[idx] = False
+            if o > max_occlusion[1] or h <= min_height[1] or t > max_trunc[1]:
+                moderate_mask[idx] = False
+            if o > max_occlusion[2] or h <= min_height[2] or t > max_trunc[2]:
+                hard_mask[idx] = False
+        is_easy = easy_mask
+        is_moderate = np.logical_xor(easy_mask, moderate_mask)
+        is_hard = np.logical_xor(hard_mask, moderate_mask)
+        for idx, object3d in enumerate(objects):
+            if is_easy[idx]:
+                object3d.difficulty = 0
+            elif is_moderate[idx]:
+                object3d.difficulty = 1
+            elif is_hard[idx]:
+                object3d.difficulty = 2
+        return objects
+    
     def __getitem__(self, index: int):
         
         # read data from files
         data = self._read_data(idx=index)
+
+        # Filter out points outside of the FOV
+        point_cloud = self._filter_fov_points(points_3d=data["lidar"][:, :3], calibration=data["calibration"])
+        # Filter Based on the radius
+        distances = np.linalg.norm(point_cloud[:, :2], ord=2, axis=1)
+        point_cloud = point_cloud[distances <= self.radius]
         
         # filter unnecessary bboxes
         bboxes: np.ndarray = data["bboxes"]
         bboxes = bboxes[~np.isin(bboxes[:, 7], list(self.dataset_config.ignored_semcls.values()))]
+        bboxes = bboxes[np.isin(bboxes[:, 8], [0])] # Easy bboxes
+        # bboxes in the radius
+        distances = np.linalg.norm(bboxes[:, :2], ord=2, axis=1)
+        bboxes = bboxes[distances <= self.radius]
         n_bboxes = bboxes.shape[0]
+
+        # augmentations
+        if self.augment:
+            point_cloud, bboxes = self.augmentor(point_cloud=point_cloud, bboxes=bboxes)
         
         # ------------------------------- LABELS ------------------------------
         box_centers = np.zeros((self.max_num_obj, 3))
@@ -400,9 +446,6 @@ class KITTIDetectionDataset(Dataset):
                     (zmin + zmax) / 2,
                 ]
             )
-
-        # Filter out points outside of the FOV
-        point_cloud = self._filter_fov_points(points_3d=data["lidar"][:, :3], calibration=data["calibration"])
 
         # Randomly sample point clound points
         point_cloud = pc_util.random_sampling(
@@ -474,7 +517,7 @@ class KITTIDetectionDataset(Dataset):
         fig = get_figure()
         # plot 3D point cloud
         print(f"Lidar Points Shape: {data['point_clouds'].shape}")
-        plot_point_cloud(data=data["point_clouds"], fig=fig)
+        plot_point_cloud(data=data["point_clouds"], name=self.filenames[idx], fig=fig)
         # plot annotations
         n_objects = int(np.sum(data['gt_box_present']))
         print(f"Number of Objects: {n_objects}")
@@ -492,8 +535,10 @@ class KITTIDetectionDataset(Dataset):
         # iterate and save the 
         for index, filename in tqdm(enumerate(self.filenames)):
             data = self._read_data(idx=index, raw=True)
-            # BBoxes format - cx, cy, cz, sx, sy, sz, rz, cls
-            bboxes = np.zeros((len(data["objects"]), 8), dtype=np.float32)
+            # BBoxes format - cx, cy, cz, sx, sy, sz, rz, cls, difficulty
+            bboxes = np.zeros((len(data["objects"]), 9), dtype=np.float32)
+            # Add Difficulty
+            data["objects"] = self._add_difficulty(objects=data["objects"])
             object3d: Object3D
             for i, object3d in enumerate(data["objects"]):
                 corners_3d = self._preprocess_3d_object(object=object3d, calibration=data["calibration"])
@@ -515,5 +560,7 @@ class KITTIDetectionDataset(Dataset):
                 bboxes[i, 6] = -object3d.ry
                 # class
                 bboxes[i, 7] = self.dataset_config.type2class[object3d.name]
+                # difficulty
+                bboxes[i, 8] = object3d.difficulty
             # save the bboxes
             np.save(self.bboxes_dir / f"{filename}.npy", bboxes)

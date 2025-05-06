@@ -46,7 +46,7 @@ def get_figure() -> go.Figure:
     return fig
 
 
-def plot_point_cloud(data: np.ndarray, fig: go.Figure) -> None:
+def plot_point_cloud(data: np.ndarray, name: str, fig: go.Figure) -> None:
     """Plot 3D Point Cloud.
 
     Args:
@@ -63,6 +63,23 @@ def plot_point_cloud(data: np.ndarray, fig: go.Figure) -> None:
                 size=1,
                 color=data[:, 2],
                 colorscale="reds",
+            ),
+            showlegend=False,
+        )
+    )
+
+    # add text
+    fig.add_trace(
+        go.Scatter3d(
+            x=[0],
+            y=[0],
+            z=[0],
+            mode="text",
+            text=[name],
+            textfont=dict(
+                family="Arial Black",  # Font family
+                size=14,               # Font size
+                color="#ff0000",            # Font color
             ),
             showlegend=False,
         )
@@ -106,3 +123,20 @@ def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: s
             )
         )
     fig.add_traces(bbox)
+    # add text
+    x, y, z = points_3d[4, :3]
+    fig.add_trace(
+        go.Scatter3d(
+            x=[x],
+            y=[y],
+            z=[z*1.05],
+            mode="text",
+            text=[name],
+            textfont=dict(
+                family="Arial Black",  # Font family
+                size=14,               # Font size
+                color=COLOR_MAP[name],            # Font color
+            ),
+            showlegend=False,
+        )
+    )

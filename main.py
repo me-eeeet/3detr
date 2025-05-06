@@ -122,6 +122,7 @@ def make_args_parser():
     parser.add_argument("--batchsize_per_gpu", default=8, type=int)
 
     ##### Training #####
+    parser.add_argument("--weights", default=None, type=str)
     parser.add_argument("--start_epoch", default=-1, type=int)
     parser.add_argument("--max_epoch", default=720, type=int)
     parser.add_argument("--eval_every_epoch", default=10, type=int)
@@ -385,6 +386,11 @@ def main(local_rank, args):
         model, _ = build_finetuning_model(args, dataset_config)
     else:
         model, _ = build_model(args, dataset_config)
+        if args.weights:
+            # load pre weights
+            sd = torch.load(args.weights, map_location=torch.device("cpu"), weights_only=False)
+            model.load_state_dict(sd["model"])
+            
     model = model.cuda(local_rank)
     model_no_ddp = model
 
