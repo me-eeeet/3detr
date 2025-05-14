@@ -14,8 +14,8 @@ from utils.calibration import Calibration
 from utils.object3d import Object3D
 from utils.plotting import get_figure, plot_point_cloud, plot_3d_bbox
 import utils.pc_util as pc_util
-from utils.box_util import rotz_batch, rotz_batch_tensor
-from utils.augmentor import PointAugmentor
+from utils.box_util import rotz_batch, rotz_batch_tensor, filter_bboxes_low_points
+from utils.augmentor import PointAugmentor, GTSampler
 
 
 class KITTIDatasetConfig(object):
@@ -23,16 +23,22 @@ class KITTIDatasetConfig(object):
     def __init__(self) -> None:
         self.type2class =  { 
             'Car': 0, 
-            'Van': 1, 
-            'Truck': 2,
-            'Pedestrian': 3,
-            'Person_sitting': 4,
-            'Cyclist': 5,
-            'Tram': 6, 
-            'Misc': 7,
+            'Pedestrian': 1,
+            'Cyclist': 2,
         }
         self.ignored_semcls = {
+            'Van': 3, 
+            'Truck': 4,
+            'Person_sitting': 5,
+            'Tram': 6, 
+            'Misc': 7,
             "DontCare": 8,
+        }
+        self.difficulty_map = {
+            0: "easy",
+            1: "medium",
+            2: "hard",
+            -1: "none"
         }
         self.num_semcls = len(self.type2class)
         self.class2type = {self.type2class[t]: t for t in self.type2class}
@@ -191,7 +197,7 @@ class KITTIDetectionDataset(Dataset):
         split_set: str = "train",
         root_dir: str = None,
         radius: float = 15,
-        num_points: int = 20000,
+        num_points: int = 15000,
         augment: bool = False,
         use_random_cuboid: bool = True,
         random_cuboid_min_points: int = 30000,
@@ -210,6 +216,7 @@ class KITTIDetectionDataset(Dataset):
         self.use_random_cuboid = use_random_cuboid
         self.random_cuboid_min_points = random_cuboid_min_points
         self.augmentor = PointAugmentor()
+        self.gt_sampler = GTSampler(dataset_config=dataset_config, p=0.7)
         
         # load filenames
         with open(str(Path(root_dir) / "sets" / f"{split_set}.txt")) as file:
@@ -222,13 +229,13 @@ class KITTIDetectionDataset(Dataset):
         self.image_2_dir = root_dir / "image_2"
         self.label_2_dir = root_dir / "label_2"
         self.bboxes_dir = root_dir / "bboxes_2"
-        self.velodyne_dir = temp_root_dir / "velodyne"
+        self.velodyne_dir = root_dir / "velodyne_processed"
         
         self.center_normalizing_range = [
             np.zeros((1, 3), dtype=np.float32),
             np.ones((1, 3), dtype=np.float32),
         ]
-        self.max_num_obj = 64
+        self.max_num_obj = 16
 
     def __len__(self) -> int:
         """Return length of the data."""
@@ -294,7 +301,7 @@ class KITTIDetectionDataset(Dataset):
             np.ndarray: 3D Point Cloud
         """
         return np.fromfile(str(self.velodyne_dir / f"{name}.bin"),
-                           dtype=np.float32).reshape((-1, 4))
+                           dtype=np.float32).reshape((-1, 3))
     
     def _read_bboxes(self, name: str) -> np.ndarray:
         """Read the processes BBoxes in Velodyne space.
@@ -390,37 +397,60 @@ class KITTIDetectionDataset(Dataset):
             elif is_hard[idx]:
                 object3d.difficulty = 2
         return objects
+
+    def _is_invalid_point_cloud(self, point_cloud: np.ndarray) -> bool:
+        if point_cloud.shape[0] == 0:
+            return True
+        else:
+            point_cloud_dims_min = point_cloud.min(axis=0)
+            point_cloud_dims_max = point_cloud.max(axis=0)
+            size = point_cloud_dims_max - point_cloud_dims_min
+            return np.any(size == 0)
     
+    def _filter_bboxes(self, bboxes: np.ndarray) -> np.ndarray:
+        bboxes = bboxes[~np.isin(bboxes[:, 7], list(self.dataset_config.ignored_semcls.values()))]
+        # bboxes = bboxes[np.isin(bboxes[:, 8], [0])] # Easy bboxes
+        # bboxes in the radius
+        distances = np.linalg.norm(bboxes[:, :2], ord=2, axis=1)
+        return bboxes[distances <= self.radius]
     def __getitem__(self, index: int):
         
         # read data from files
         data = self._read_data(idx=index)
 
-        # Filter out points outside of the FOV
-        point_cloud = self._filter_fov_points(points_3d=data["lidar"][:, :3], calibration=data["calibration"])
-        # Filter Based on the radius
-        distances = np.linalg.norm(point_cloud[:, :2], ord=2, axis=1)
-        point_cloud = point_cloud[distances <= self.radius]
-        
+        point_cloud = data["lidar"][:, :3]
+
+        # Add random points
+        if self._is_invalid_point_cloud(point_cloud=point_cloud):
+            point_cloud = np.array([[0, 0, 0], [1, 1, 1]], dtype=point_cloud.dtype)
+            
         # filter unnecessary bboxes
         bboxes: np.ndarray = data["bboxes"]
-        bboxes = bboxes[~np.isin(bboxes[:, 7], list(self.dataset_config.ignored_semcls.values()))]
-        bboxes = bboxes[np.isin(bboxes[:, 8], [0])] # Easy bboxes
-        # bboxes in the radius
-        distances = np.linalg.norm(bboxes[:, :2], ord=2, axis=1)
-        bboxes = bboxes[distances <= self.radius]
-        n_bboxes = bboxes.shape[0]
+        bboxes = self._filter_bboxes(bboxes=bboxes)
 
         # augmentations
         if self.augment:
             point_cloud, bboxes = self.augmentor(point_cloud=point_cloud, bboxes=bboxes)
+            # get random data point
+            filename2 = np.random.choice(self.filenames)
+            point_cloud2 = self._read_lidar_data(name=filename2)[:, :3]
+            bboxes2 = self._filter_bboxes(self._read_bboxes(name=filename2))
+            # gt sampler
+            point_cloud, bboxes = self.gt_sampler(point_cloud=point_cloud, bboxes=bboxes, point_cloud_b=point_cloud2, bboxes_b=bboxes2)
         
+        # remove bboxes not having minimum points
+        corners = self.dataset_config.box_parametrization_to_corners_np(centers=bboxes[:, :3], sizes=bboxes[:, 3:6], angles=bboxes[:, 6])
+        mask = filter_bboxes_low_points(point_cloud=point_cloud, corners=corners, min_points=100)
+        bboxes = bboxes[mask]
+        n_bboxes = bboxes.shape[0]
+
         # ------------------------------- LABELS ------------------------------
         box_centers = np.zeros((self.max_num_obj, 3))
         raw_sizes = np.zeros((self.max_num_obj, 3), dtype=np.float32)
         raw_angles = np.zeros((self.max_num_obj,), dtype=np.float32)
         angle_classes = np.zeros((self.max_num_obj,), dtype=np.float32)
         angle_residuals = np.zeros((self.max_num_obj,), dtype=np.float32)
+        difficulty = np.zeros((self.max_num_obj,))
         target_bboxes_semcls = np.zeros((self.max_num_obj))
         target_bboxes_mask = np.zeros((self.max_num_obj))
         target_bboxes_mask[:n_bboxes] = 1
@@ -446,6 +476,7 @@ class KITTIDetectionDataset(Dataset):
                     (zmin + zmax) / 2,
                 ]
             )
+            difficulty[i] = bbox[8]
 
         # Randomly sample point clound points
         point_cloud = pc_util.random_sampling(
@@ -502,6 +533,7 @@ class KITTIDetectionDataset(Dataset):
         ret_dict["gt_box_angles"] = raw_angles.astype(np.float32)
         ret_dict["gt_angle_class_label"] = angle_classes
         ret_dict["gt_angle_residual_label"] = angle_residuals
+        ret_dict["gt_difficulty"] = difficulty.astype(np.int64)
         ret_dict["point_cloud_dims_min"] = point_cloud_dims_min
         ret_dict["point_cloud_dims_max"] = point_cloud_dims_max
         return ret_dict
@@ -525,7 +557,7 @@ class KITTIDetectionDataset(Dataset):
             name = self.dataset_config.class2type[data["gt_box_sem_cls_label"][i]]
             points_3d = data["gt_box_corners"][i]
             print(f"Object: {name}\nPoints: {points_3d}")
-            plot_3d_bbox(points_3d=points_3d, name=name, fig=fig)
+            plot_3d_bbox(points_3d=points_3d, name=name, fig=fig, extra_text=self.dataset_config.difficulty_map[data["gt_difficulty"][i]])
         fig.show()
 
     def convert(self) -> None:

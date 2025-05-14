@@ -44,6 +44,9 @@ class RandomCuboid(object):
             crop_range = self.min_crop + np.random.rand(3) * (
                 self.max_crop - self.min_crop
             )
+            # don't crop along z plane
+            crop_range[2] = 1.0
+            
             if not check_aspect(crop_range, self.aspect):
                 continue
 
@@ -53,6 +56,10 @@ class RandomCuboid(object):
 
             max_xyz = sample_center + new_range
             min_xyz = sample_center - new_range
+
+            # keep z range same
+            max_xyz[2] = np.max(point_cloud[:, 2])
+            min_xyz[2] = np.min(point_cloud[:, 2])
 
             upper_idx = (
                 np.sum((point_cloud[:, 0:3] <= max_xyz).astype(np.int32), 1) == 3

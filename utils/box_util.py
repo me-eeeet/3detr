@@ -768,3 +768,12 @@ def generalized_box3d_iou(
             return generalized_box3d_iou_cython(
                 corners1, corners2, nums_k2, rotated_boxes, return_inter_vols_only
             )
+
+
+def filter_bboxes_low_points(point_cloud: np.ndarray, corners: np.ndarray, min_points: int = 100) -> np.ndarray:
+    mask = np.ones((corners.shape[0]), dtype=np.bool)
+    for idx in range(corners.shape[0]):
+        num_points = np.sum(extract_pc_in_box3d(point_cloud, corners[idx])[1])
+        if num_points < min_points:
+            mask[idx] = False
+    return mask

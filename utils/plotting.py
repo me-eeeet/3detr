@@ -1,6 +1,7 @@
 """Plotting Utils."""
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import numpy as np
 
 # Color Mapping
@@ -27,26 +28,35 @@ COLOR_MAP = {
 }
 
 
-def get_figure() -> go.Figure:
+def get_figure(rows: int = 1, cols: int = 1, titles: list[str] = None) -> go.Figure:
     """Return a Plotly Figure.
 
     Returns:
         go.Figure: Plotly Figure
     """
-    fig = go.Figure()
+    fig = make_subplots(
+    rows=rows,
+    cols=cols,
+    specs=[[{'type': 'scene'}] * cols] * rows,
+    subplot_titles=titles,
+    )
+    for row in range(1, rows + 1):
+        for col in range(1, cols+1):
+            fig.update_scenes(
+                xaxis=dict(showgrid=False, zeroline=False, showbackground=True, backgroundcolor='black'),
+                yaxis=dict(showgrid=False, zeroline=False, showbackground=True, backgroundcolor='black'),
+                zaxis=dict(showgrid=False, zeroline=False, showbackground=True, backgroundcolor='black'),
+                aspectmode='data',
+                row=row,
+                col=col,
+            )
     fig.update_layout(
-        scene=dict(
-            xaxis=dict(showgrid=False, zeroline=False, showbackground=True, backgroundcolor='black'),
-            yaxis=dict(showgrid=False, zeroline=False, showbackground=True, backgroundcolor='black'),
-            zaxis=dict(showgrid=False, zeroline=False, showbackground=True, backgroundcolor='black'),
-            aspectmode='data',
-        ),
         paper_bgcolor ="black",
     )
     return fig
 
 
-def plot_point_cloud(data: np.ndarray, name: str, fig: go.Figure) -> None:
+def plot_point_cloud(data: np.ndarray, name: str, fig: go.Figure, row: int = None, col: int = None) -> None:
     """Plot 3D Point Cloud.
 
     Args:
@@ -65,7 +75,9 @@ def plot_point_cloud(data: np.ndarray, name: str, fig: go.Figure) -> None:
                 colorscale="reds",
             ),
             showlegend=False,
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # add text
@@ -82,11 +94,13 @@ def plot_point_cloud(data: np.ndarray, name: str, fig: go.Figure) -> None:
                 color="#ff0000",            # Font color
             ),
             showlegend=False,
-        )
+        ),
+        row=row,
+        col=col,
     )
 
 
-def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: str = "") -> None:
+def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: str = "", row: int = None, col: int = None) -> None:
     """Plot 3D Bounding Box.
 
     Args:
@@ -113,7 +127,7 @@ def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: s
                     color=COLOR_MAP[name],
                     width=3,
                 ),
-                hovertext=[name, extra_text],
+                hovertext=[],
                 hoverinfo="text",
                 hoverlabel=dict(
                     font=dict(size=20, color=COLOR_MAP[name]),
@@ -122,7 +136,7 @@ def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: s
                 showlegend=False,
             )
         )
-    fig.add_traces(bbox)
+    fig.add_traces(bbox, rows=row, cols=col)
     # add text
     x, y, z = points_3d[4, :3]
     fig.add_trace(
@@ -131,12 +145,14 @@ def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: s
             y=[y],
             z=[z*1.05],
             mode="text",
-            text=[name],
+            text=[f"{name}_{extra_text}" if len(extra_text) else name],
             textfont=dict(
                 family="Arial Black",  # Font family
                 size=14,               # Font size
                 color=COLOR_MAP[name],            # Font color
             ),
             showlegend=False,
-        )
+        ),
+        row=row,
+        col=col,
     )

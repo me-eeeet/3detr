@@ -3,6 +3,8 @@
 
 import numpy as np
 from utils.pc_util import rotz
+from utils.random_cuboid import RandomCuboid
+from utils.box_util import extract_pc_in_box3d, box3d_iou
 
 
 class PointAugmentor:
@@ -16,6 +18,7 @@ class PointAugmentor:
             scale: tuple[float, float] = (0.85, 1.15),
             jitter: float = 0.01,
             dropout: float = 0.0,
+            cuboid: tuple[float, float, float] = [0.5, 1.0],
         ) -> None:
         self.flip_x = flip_x
         self.flip_y = flip_y
@@ -24,6 +27,12 @@ class PointAugmentor:
         self.scale = scale
         self.jitter = jitter
         self.dropout = dropout
+        self.cuboid = RandomCuboid(
+            min_points=3072,
+            aspect=0.5,
+            min_crop=cuboid[0],
+            max_crop=cuboid[1],
+        )
 
     def __call__(self, point_cloud: np.ndarray, bboxes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         point_cloud, bboxes = self.random_flip_x(point_cloud=point_cloud, bboxes=bboxes)
@@ -33,6 +42,7 @@ class PointAugmentor:
         point_cloud, bboxes = self.random_translate(point_cloud=point_cloud, bboxes=bboxes)
         point_cloud, bboxes = self.random_jitter(point_cloud=point_cloud, bboxes=bboxes)
         point_cloud, bboxes = self.random_dropout(point_cloud=point_cloud, bboxes=bboxes)
+        point_cloud, bboxes = self.random_cuboid(point_cloud=point_cloud, bboxes=bboxes)
         return point_cloud, bboxes
 
     def random_flip_x(self, point_cloud: np.ndarray, bboxes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -87,3 +97,76 @@ class PointAugmentor:
         # pad with zeros to maintain shape
         point_cloud = point_cloud[keep_mask]
         return point_cloud, bboxes
+    
+    def random_cuboid(self, point_cloud: np.ndarray, bboxes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        point_cloud, bboxes, _ = self.cuboid(point_cloud=point_cloud, target_boxes=bboxes)
+        return point_cloud, bboxes
+    
+
+class GTSampler:
+
+    def __init__(
+        self, 
+        dataset_config, 
+        p: float = 0.5, 
+        max_iou: float = 0.1, 
+        max_points: float = 10,
+    ) -> None:
+        self.dataset_config = dataset_config
+        self.p = p
+        self.max_iou = max_iou
+        self.max_points = max_points
+
+    def __call__(
+        self, 
+        point_cloud: np.ndarray, 
+        bboxes: np.ndarray, 
+        point_cloud_b: np.ndarray, 
+        bboxes_b: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        min_coords = point_cloud.min(axis=0)
+        max_coords = point_cloud.max(axis=0)
+        corners1 = self.dataset_config.box_parametrization_to_corners_np(centers=bboxes[:, :3], sizes=bboxes[:, 3:6], angles=bboxes[:, 6])
+        for i in range(bboxes_b.shape[0]):
+            if np.random.random() < self.p:
+                bbox = bboxes_b[i]
+                # corners
+                corners = self.dataset_config.my_compute_box_3d(center=bbox[:3], size=bbox[3:6], angle=bbox[6])
+                # get the points inside this bbox
+                points_inside, _ = extract_pc_in_box3d(point_cloud_b, corners)
+                # normalize the points
+                points_inside[:, :3] -= bbox[:3]
+                # randomly rotate the object
+                rotation = np.random.uniform(-np.pi / 6, np.pi / 6)
+                rot_mat = rotz(rotation)
+                points_inside[:, 0:3] = np.dot(points_inside[:, 0:3], np.transpose(rot_mat))
+                # paste the object
+                tries = 5
+                while tries > 0:
+                    # find a random destination point
+                    new_center = np.random.uniform(min_coords, max_coords)
+                    # keep the z corrdinate same
+                    new_center[2] = min_coords[2] + bbox[5] / 2
+                    # corners
+                    corners = self.dataset_config.my_compute_box_3d(center=new_center, size=bbox[3:6], angle=bbox[6]+rotation)
+                    # check if there are points inside the bbox
+                    indices = extract_pc_in_box3d(point_cloud, corners)[1]
+                    if np.sum(indices) <= self.max_points:
+                        # check it it's overlapping with other objects
+                        for j in range(bboxes.shape[0]):
+                            if box3d_iou(corners1=corners1[j], corners2=corners)[0] >= self.max_iou:
+                                break
+                        else:
+                            points_inside[:, :3] += new_center
+                            # add the points to the point cloud
+                            point_cloud = np.r_[point_cloud, points_inside]
+                            # add the bbox
+                            bbox[:3] = new_center
+                            bbox[6] += rotation
+                            bboxes = np.r_[bboxes, bbox[None, ...]]
+                            # update corners
+                            corners1 = np.r_[corners1, corners[None, ...]]
+                            break
+                    tries -= 1
+        return point_cloud, bboxes
+    

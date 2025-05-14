@@ -11,3 +11,5 @@ numpy
 pillow
 tensorboardX
 tqdm
+mlflow
+kaleido
