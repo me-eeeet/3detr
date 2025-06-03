@@ -149,7 +149,7 @@ def plot_3d_bbox(points_3d: np.ndarray, name: str, fig: go.Figure, extra_text: s
             textfont=dict(
                 family="Arial Black",  # Font family
                 size=14,               # Font size
-                color=COLOR_MAP[name],            # Font color
+                color="#ffffff",            # Font color
             ),
             showlegend=False,
         ),

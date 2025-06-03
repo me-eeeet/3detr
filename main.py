@@ -185,6 +185,7 @@ def do_train(
     dataset_config,
     dataloaders,
     best_val_metrics,
+    best_val_metrics_50 = {},
 ):
     """
     Main training loop.
@@ -239,6 +240,7 @@ def do_train(
                 epoch,
                 args,
                 best_val_metrics,
+                best_val_metrics_50,
                 filename="checkpoint.pth",
             )
 
@@ -269,6 +271,7 @@ def do_train(
                     epoch,
                     args,
                     best_val_metrics,
+                    best_val_metrics_50,
                 )
 
             if epoch % args.eval_every_epoch == 0 or epoch == (args.max_epoch - 1):
@@ -284,6 +287,7 @@ def do_train(
                 )
                 metrics = ap_calculator.compute_metrics()
                 ap25 = metrics[0.25]["mAP"]
+                ap50 = metrics[0.5]["mAP"]
                 metric_str = ap_calculator.metrics_to_str(metrics, per_class=True)
                 metrics_dict = ap_calculator.metrics_to_dict(metrics)
                 if is_primary():
@@ -308,10 +312,31 @@ def do_train(
                         epoch,
                         args,
                         best_val_metrics,
+                        best_val_metrics_50,
                         filename=filename,
                     )
                     print(
                         f"Epoch [{epoch}/{args.max_epoch}] saved current best val checkpoint at {filename}; ap25 {ap25}"
+                    )
+                    mlflow.log_artifact(os.path.join(args.checkpoint_dir, filename))
+                # Save checkpoint with best 0.5mAP
+                if is_primary() and (
+                    len(best_val_metrics_50) == 0 or best_val_metrics_50[0.5]["mAP"] < ap50
+                ):
+                    best_val_metrics_50 = metrics
+                    filename = "checkpoint_best_50.pth"
+                    save_checkpoint(
+                        args.checkpoint_dir,
+                        model_no_ddp,
+                        optimizer,
+                        epoch,
+                        args,
+                        best_val_metrics,
+                        best_val_metrics_50,
+                        filename=filename,
+                    )
+                    print(
+                        f"Epoch [{epoch}/{args.max_epoch}] saved current best val checkpoint at {filename}; ap50 {ap50}"
                     )
                     mlflow.log_artifact(os.path.join(args.checkpoint_dir, filename))
 
@@ -373,16 +398,16 @@ def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders
         logger,
         curr_iter,
     )
-    # Save the predictions in .npy
-    if args.save_predictions:
-        print("Saving Predictions....")
-        ap_calculator.save_predictions(output_dir=args.predictions_path)
     metrics = ap_calculator.compute_metrics()
     metric_str = ap_calculator.metrics_to_str(metrics)
     if is_primary():
         print("==" * 10)
         print(f"Test model; Metrics {metric_str}")
         print("==" * 10)
+    # Save the predictions in .npy
+    if args.save_predictions:
+        print("Saving Predictions....")
+        ap_calculator.save_predictions(output_dir=args.predictions_path)
 
 
 def main(local_rank, args):
@@ -463,7 +488,7 @@ def main(local_rank, args):
         if is_primary() and not os.path.isdir(args.checkpoint_dir):
             os.makedirs(args.checkpoint_dir, exist_ok=True)
         optimizer = build_optimizer(args, model_no_ddp)
-        loaded_epoch, best_val_metrics = resume_if_possible(
+        loaded_epoch, best_val_metrics, best_val_metrics_50 = resume_if_possible(
             args.checkpoint_dir, model_no_ddp, optimizer
         )
         args.start_epoch = loaded_epoch + 1
@@ -476,6 +501,7 @@ def main(local_rank, args):
             dataset_config,
             dataloaders,
             best_val_metrics,
+            best_val_metrics_50
         )
 
 

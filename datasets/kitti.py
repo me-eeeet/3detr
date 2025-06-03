@@ -413,6 +413,7 @@ class KITTIDetectionDataset(Dataset):
         # bboxes in the radius
         distances = np.linalg.norm(bboxes[:, :2], ord=2, axis=1)
         return bboxes[distances <= self.radius]
+    
     def __getitem__(self, index: int):
         
         # read data from files
@@ -455,7 +456,7 @@ class KITTIDetectionDataset(Dataset):
         target_bboxes_mask = np.zeros((self.max_num_obj))
         target_bboxes_mask[:n_bboxes] = 1
 
-        for i in range(n_bboxes):
+        for i in range(min(n_bboxes, self.max_num_obj)):
             bbox = bboxes[i]
             target_bboxes_semcls[i] = bbox[7]
             raw_angles[i] = bbox[6]

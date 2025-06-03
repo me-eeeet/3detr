@@ -154,7 +154,7 @@ def evaluate(
     # ap calculator is exact for evaluation. This is slower than the ap calculator used during training.
     ap_calculator = APCalculator(
         dataset_config=dataset_config,
-        ap_iou_thresh=[0.25, 0.5],
+        ap_iou_thresh=[0.25, 0.5, 0.7],
         class2type_map=dataset_config.class2type,
         exact_eval=True,
     )

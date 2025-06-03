@@ -200,11 +200,12 @@ def parse_predictions(
             cur_list = []
             for ii in range(config_dict["dataset_config"].num_semcls):
                 cur_list += [
-                    (
+                    [
                         ii,
                         pred_corners_3d_upright_camera[i, j],
                         sem_cls_probs[i, j, ii] * obj_prob[i, j],
-                    )
+                        0.0
+                    ]
                     for j in range(pred_corners_3d_upright_camera.shape[1])
                     if pred_mask[i, j] == 1
                     and obj_prob[i, j] > config_dict["conf_thresh"]
@@ -213,11 +214,12 @@ def parse_predictions(
         elif config_dict["use_cls_confidence_only"]:
             batch_pred_map_cls.append(
                 [
-                    (
+                    [
                         pred_sem_cls[i, j].item(),
                         pred_corners_3d_upright_camera[i, j],
                         sem_cls_probs[i, j, pred_sem_cls[i, j].item()],
-                    )
+                        0.0
+                    ]
                     for j in range(pred_corners_3d_upright_camera.shape[1])
                     if pred_mask[i, j] == 1
                     and obj_prob[i, j] > config_dict["conf_thresh"]
@@ -226,11 +228,12 @@ def parse_predictions(
         else:
             batch_pred_map_cls.append(
                 [
-                    (
+                    [
                         pred_sem_cls[i, j].item(),
                         pred_corners_3d_upright_camera[i, j],
                         obj_prob[i, j],
-                    )
+                        0.0
+                    ]
                     for j in range(pred_corners_3d_upright_camera.shape[1])
                     if pred_mask[i, j] == 1
                     and obj_prob[i, j] > config_dict["conf_thresh"]
@@ -378,12 +381,13 @@ class APCalculator(object):
                 "ids": np.zeros((n,), dtype=np.uint32),
                 "corners": np.zeros((n, 8, 3), dtype=np.float32),
                 "scores": np.zeros((n,), dtype=np.float32),
-
+                "ious": np.zeros((n,), dtype=np.float32),
             }
-            for jdx, (id, corners, score) in enumerate(self.pred_map_cls[idx]):
+            for jdx, (id, corners, score, iou) in enumerate(self.pred_map_cls[idx]):
                 output["ids"][jdx] = id
                 output["corners"][jdx] = corners
                 output["scores"][jdx] = score
+                output["ious"][jdx] = iou
             np.save(str(output_dir / f"{idx}.npy"), output)
 
     def compute_metrics(self):
