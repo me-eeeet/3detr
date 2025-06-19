@@ -38,6 +38,7 @@ if __name__ == "__main__":
         dataset_config=config,
         split_set=args.split,
         root_dir=args.root_dir,
+        augment=False,
     )
     print(f"Dataset Length: {len(dataset)}")
     dataset.plot_data(idx=args.idx)

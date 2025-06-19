@@ -35,10 +35,10 @@ def get_figure(rows: int = 1, cols: int = 1, titles: list[str] = None) -> go.Fig
         go.Figure: Plotly Figure
     """
     fig = make_subplots(
-    rows=rows,
-    cols=cols,
-    specs=[[{'type': 'scene'}] * cols] * rows,
-    subplot_titles=titles,
+        rows=rows,
+        cols=cols,
+        specs=[[{'type': 'scene'}] * cols] * rows,
+        subplot_titles=titles,
     )
     for row in range(1, rows + 1):
         for col in range(1, cols+1):
