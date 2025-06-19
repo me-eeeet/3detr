@@ -5,6 +5,7 @@ import os
 import sys
 import pickle
 
+import mlflow
 import numpy as np
 import torch
 from torch.multiprocessing import set_start_method
@@ -102,7 +103,7 @@ def make_args_parser():
 
     ##### Dataset #####
     parser.add_argument(
-        "--dataset_name", required=True, type=str, choices=["scannet", "sunrgbd"]
+        "--dataset_name", required=True, type=str, choices=["scannet", "sunrgbd", "kitti"]
     )
     parser.add_argument(
         "--dataset_root_dir",
@@ -122,10 +123,12 @@ def make_args_parser():
     parser.add_argument("--batchsize_per_gpu", default=8, type=int)
 
     ##### Training #####
+    parser.add_argument("--weights", default=None, type=str)
     parser.add_argument("--start_epoch", default=-1, type=int)
     parser.add_argument("--max_epoch", default=720, type=int)
     parser.add_argument("--eval_every_epoch", default=10, type=int)
     parser.add_argument("--seed", default=0, type=int)
+    parser.add_argument("--accumulation_steps", type=int, default=1)
 
     ##### Testing #####
     parser.add_argument("--test_only", default=False, action="store_true")
@@ -141,7 +144,36 @@ def make_args_parser():
     parser.add_argument("--ngpus", default=1, type=int)
     parser.add_argument("--dist_url", default="tcp://localhost:12345", type=str)
 
+    ##### Finetuning #####
+    parser.add_argument("--finetune", default=False, action="store_true")
+    parser.add_argument("--finetune_weights", default=None, type=str)
+
+    ##### Save Prediction #####
+    parser.add_argument("--save_predictions", default=False, action="store_true")
+    parser.add_argument("--predictions_path", default="predictions", type=str)
+
+    ##### ML Flow ####
+    parser.add_argument("--mlflow_uri", type=str, default="http://127.0.0.1:8296")
+    parser.add_argument("--mlflow_exp_name", type=str, default="3detr")
+
     return parser
+
+
+def build_finetuning_model(args, dataset_config):
+    from datasets import SunrgbdDatasetConfig
+    from models.model_3detr import BoxProcessor
+    # build model
+    model, processor = build_model(args, SunrgbdDatasetConfig())
+    # load saved weights
+    sd = torch.load(args.finetune_weights, map_location=torch.device("cpu"), weights_only=False)
+    model.load_state_dict(sd["model"])
+    # freeze all layers
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+    # Update the MLP Head & Box Processor
+    model.build_mlp_heads(dataset_config=dataset_config, decoder_dim=args.dec_dim, mlp_dropout=args.mlp_dropout)
+    model.box_processor = BoxProcessor(dataset_config)
+    return model, processor
 
 
 def do_train(
@@ -153,12 +185,16 @@ def do_train(
     dataset_config,
     dataloaders,
     best_val_metrics,
+    best_val_metrics_50 = {},
 ):
     """
     Main training loop.
     This trains the model for `args.max_epoch` epochs and tests the model after every `args.eval_every_epoch`.
     We always evaluate the final checkpoint and report both the final AP and best AP on the val set.
     """
+
+    mlflow.set_tracking_uri(args.mlflow_uri)
+    mlflow.set_experiment(args.mlflow_exp_name)
 
     num_iters_per_epoch = len(dataloaders["train"])
     num_iters_per_eval_epoch = len(dataloaders["test"])
@@ -176,48 +212,27 @@ def do_train(
 
     logger = Logger(args.checkpoint_dir)
 
-    for epoch in range(args.start_epoch, args.max_epoch):
-        if is_distributed():
-            dataloaders["train_sampler"].set_epoch(epoch)
+    with mlflow.start_run():
 
-        aps = train_one_epoch(
-            args,
-            epoch,
-            model,
-            optimizer,
-            criterion,
-            dataset_config,
-            dataloaders["train"],
-            logger,
-        )
+        # Log parameters
+        mlflow.log_params(vars(args))
 
-        # latest checkpoint is always stored in checkpoint.pth
-        save_checkpoint(
-            args.checkpoint_dir,
-            model_no_ddp,
-            optimizer,
-            epoch,
-            args,
-            best_val_metrics,
-            filename="checkpoint.pth",
-        )
+        for epoch in range(args.start_epoch, args.max_epoch):
+            if is_distributed():
+                dataloaders["train_sampler"].set_epoch(epoch)
 
-        metrics = aps.compute_metrics()
-        metric_str = aps.metrics_to_str(metrics, per_class=False)
-        metrics_dict = aps.metrics_to_dict(metrics)
-        curr_iter = epoch * len(dataloaders["train"])
-        if is_primary():
-            print("==" * 10)
-            print(f"Epoch [{epoch}/{args.max_epoch}]; Metrics {metric_str}")
-            print("==" * 10)
-            logger.log_scalars(metrics_dict, curr_iter, prefix="Train/")
+            aps = train_one_epoch(
+                args,
+                epoch,
+                model,
+                optimizer,
+                criterion,
+                dataset_config,
+                dataloaders["train"],
+                logger,
+            )
 
-        if (
-            epoch > 0
-            and args.save_separate_checkpoint_every_epoch > 0
-            and epoch % args.save_separate_checkpoint_every_epoch == 0
-        ):
-            # separate checkpoints are stored as checkpoint_{epoch}.pth
+            # latest checkpoint is always stored in checkpoint.pth
             save_checkpoint(
                 args.checkpoint_dir,
                 model_no_ddp,
@@ -225,34 +240,30 @@ def do_train(
                 epoch,
                 args,
                 best_val_metrics,
+                best_val_metrics_50,
+                filename="checkpoint.pth",
             )
 
-        if epoch % args.eval_every_epoch == 0 or epoch == (args.max_epoch - 1):
-            ap_calculator = evaluate(
-                args,
-                epoch,
-                model,
-                criterion,
-                dataset_config,
-                dataloaders["test"],
-                logger,
-                curr_iter,
-            )
-            metrics = ap_calculator.compute_metrics()
-            ap25 = metrics[0.25]["mAP"]
-            metric_str = ap_calculator.metrics_to_str(metrics, per_class=True)
-            metrics_dict = ap_calculator.metrics_to_dict(metrics)
+            metrics = aps.compute_metrics()
+            metric_str = aps.metrics_to_str(metrics, per_class=False)
+            metrics_dict = aps.metrics_to_dict(metrics)
+            curr_iter = epoch * len(dataloaders["train"])
             if is_primary():
                 print("==" * 10)
-                print(f"Evaluate Epoch [{epoch}/{args.max_epoch}]; Metrics {metric_str}")
+                print(f"Epoch [{epoch}/{args.max_epoch}]; Metrics {metric_str}")
                 print("==" * 10)
-                logger.log_scalars(metrics_dict, curr_iter, prefix="Test/")
+                logger.log_scalars(metrics_dict, curr_iter, prefix="Train/")
+                mlflow.log_metrics(
+                    {f"train_{k}" : v for k, v in metrics_dict.items()},
+                    step=epoch,
+                )
 
-            if is_primary() and (
-                len(best_val_metrics) == 0 or best_val_metrics[0.25]["mAP"] < ap25
+            if (
+                epoch > 0
+                and args.save_separate_checkpoint_every_epoch > 0
+                and epoch % args.save_separate_checkpoint_every_epoch == 0
             ):
-                best_val_metrics = metrics
-                filename = "checkpoint_best.pth"
+                # separate checkpoints are stored as checkpoint_{epoch}.pth
                 save_checkpoint(
                     args.checkpoint_dir,
                     model_no_ddp,
@@ -260,45 +271,110 @@ def do_train(
                     epoch,
                     args,
                     best_val_metrics,
-                    filename=filename,
-                )
-                print(
-                    f"Epoch [{epoch}/{args.max_epoch}] saved current best val checkpoint at {filename}; ap25 {ap25}"
+                    best_val_metrics_50,
                 )
 
-    # always evaluate last checkpoint
-    epoch = args.max_epoch - 1
-    curr_iter = epoch * len(dataloaders["train"])
-    ap_calculator = evaluate(
-        args,
-        epoch,
-        model,
-        criterion,
-        dataset_config,
-        dataloaders["test"],
-        logger,
-        curr_iter,
-    )
-    metrics = ap_calculator.compute_metrics()
-    metric_str = ap_calculator.metrics_to_str(metrics)
-    if is_primary():
-        print("==" * 10)
-        print(f"Evaluate Final [{epoch}/{args.max_epoch}]; Metrics {metric_str}")
-        print("==" * 10)
+            if epoch % args.eval_every_epoch == 0 or epoch == (args.max_epoch - 1):
+                ap_calculator = evaluate(
+                    args,
+                    epoch,
+                    model,
+                    criterion,
+                    dataset_config,
+                    dataloaders["test"],
+                    logger,
+                    curr_iter,
+                )
+                metrics = ap_calculator.compute_metrics()
+                ap25 = metrics[0.25]["mAP"]
+                ap50 = metrics[0.5]["mAP"]
+                metric_str = ap_calculator.metrics_to_str(metrics, per_class=True)
+                metrics_dict = ap_calculator.metrics_to_dict(metrics)
+                if is_primary():
+                    print("==" * 10)
+                    print(f"Evaluate Epoch [{epoch}/{args.max_epoch}]; Metrics {metric_str}")
+                    print("==" * 10)
+                    logger.log_scalars(metrics_dict, curr_iter, prefix="Test/")
+                    mlflow.log_metrics(
+                        {f"val_{k}" : v for k, v in metrics_dict.items()},
+                        step=epoch,
+                    )
 
-        with open(final_eval, "w") as fh:
-            fh.write("Training Finished.\n")
-            fh.write("==" * 10)
-            fh.write("Final Eval Numbers.\n")
-            fh.write(metric_str)
-            fh.write("\n")
-            fh.write("==" * 10)
-            fh.write("Best Eval Numbers.\n")
-            fh.write(ap_calculator.metrics_to_str(best_val_metrics))
-            fh.write("\n")
+                if is_primary() and (
+                    len(best_val_metrics) == 0 or best_val_metrics[0.25]["mAP"] < ap25
+                ):
+                    best_val_metrics = metrics
+                    filename = "checkpoint_best.pth"
+                    save_checkpoint(
+                        args.checkpoint_dir,
+                        model_no_ddp,
+                        optimizer,
+                        epoch,
+                        args,
+                        best_val_metrics,
+                        best_val_metrics_50,
+                        filename=filename,
+                    )
+                    print(
+                        f"Epoch [{epoch}/{args.max_epoch}] saved current best val checkpoint at {filename}; ap25 {ap25}"
+                    )
+                    mlflow.log_artifact(os.path.join(args.checkpoint_dir, filename))
+                # Save checkpoint with best 0.5mAP
+                if is_primary() and (
+                    len(best_val_metrics_50) == 0 or best_val_metrics_50[0.5]["mAP"] < ap50
+                ):
+                    best_val_metrics_50 = metrics
+                    filename = "checkpoint_best_50.pth"
+                    save_checkpoint(
+                        args.checkpoint_dir,
+                        model_no_ddp,
+                        optimizer,
+                        epoch,
+                        args,
+                        best_val_metrics,
+                        best_val_metrics_50,
+                        filename=filename,
+                    )
+                    print(
+                        f"Epoch [{epoch}/{args.max_epoch}] saved current best val checkpoint at {filename}; ap50 {ap50}"
+                    )
+                    mlflow.log_artifact(os.path.join(args.checkpoint_dir, filename))
 
-        with open(final_eval_pkl, "wb") as fh:
-            pickle.dump(metrics, fh)
+        # always evaluate last checkpoint
+        epoch = args.max_epoch - 1
+        curr_iter = epoch * len(dataloaders["train"])
+        ap_calculator = evaluate(
+            args,
+            epoch,
+            model,
+            criterion,
+            dataset_config,
+            dataloaders["test"],
+            logger,
+            curr_iter,
+        )
+        metrics = ap_calculator.compute_metrics()
+        metric_str = ap_calculator.metrics_to_str(metrics)
+        if is_primary():
+            print("==" * 10)
+            print(f"Evaluate Final [{epoch}/{args.max_epoch}]; Metrics {metric_str}")
+            print("==" * 10)
+
+            with open(final_eval, "w") as fh:
+                fh.write("Training Finished.\n")
+                fh.write("==" * 10)
+                fh.write("Final Eval Numbers.\n")
+                fh.write(metric_str)
+                fh.write("\n")
+                fh.write("==" * 10)
+                fh.write("Best Eval Numbers.\n")
+                fh.write(ap_calculator.metrics_to_str(best_val_metrics))
+                fh.write("\n")
+
+            with open(final_eval_pkl, "wb") as fh:
+                pickle.dump(metrics, fh)
+
+            mlflow.log_artifact(final_eval_pkl)
 
 
 def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders):
@@ -306,7 +382,7 @@ def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders
         f"Please specify a test checkpoint using --test_ckpt. Found invalid value {args.test_ckpt}"
         sys.exit(1)
 
-    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"))
+    sd = torch.load(args.test_ckpt, map_location=torch.device("cpu"), weights_only=False)
     model_no_ddp.load_state_dict(sd["model"])
     logger = Logger()
     criterion = None  # do not compute loss for speed-up; Comment out to see test loss
@@ -328,6 +404,10 @@ def test_model(args, model, model_no_ddp, criterion, dataset_config, dataloaders
         print("==" * 10)
         print(f"Test model; Metrics {metric_str}")
         print("==" * 10)
+    # Save the predictions in .npy
+    if args.save_predictions:
+        print("Saving Predictions....")
+        ap_calculator.save_predictions(output_dir=args.predictions_path)
 
 
 def main(local_rank, args):
@@ -352,7 +432,15 @@ def main(local_rank, args):
         torch.cuda.manual_seed_all(args.seed + get_rank())
 
     datasets, dataset_config = build_dataset(args)
-    model, _ = build_model(args, dataset_config)
+    if args.finetune:
+        model, _ = build_finetuning_model(args, dataset_config)
+    else:
+        model, _ = build_model(args, dataset_config)
+        if args.weights:
+            # load pre weights
+            sd = torch.load(args.weights, map_location=torch.device("cpu"), weights_only=False)
+            model.load_state_dict(sd["model"])
+            
     model = model.cuda(local_rank)
     model_no_ddp = model
 
@@ -400,7 +488,7 @@ def main(local_rank, args):
         if is_primary() and not os.path.isdir(args.checkpoint_dir):
             os.makedirs(args.checkpoint_dir, exist_ok=True)
         optimizer = build_optimizer(args, model_no_ddp)
-        loaded_epoch, best_val_metrics = resume_if_possible(
+        loaded_epoch, best_val_metrics, best_val_metrics_50 = resume_if_possible(
             args.checkpoint_dir, model_no_ddp, optimizer
         )
         args.start_epoch = loaded_epoch + 1
@@ -413,6 +501,7 @@ def main(local_rank, args):
             dataset_config,
             dataloaders,
             best_val_metrics,
+            best_val_metrics_50
         )
 
 

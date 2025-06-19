@@ -1,11 +1,13 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 from .scannet import ScannetDetectionDataset, ScannetDatasetConfig
 from .sunrgbd import SunrgbdDetectionDataset, SunrgbdDatasetConfig
+from .kitti import KITTIDetectionDataset, KITTIDatasetConfig
 
 
 DATASET_FUNCTIONS = {
     "scannet": [ScannetDetectionDataset, ScannetDatasetConfig],
     "sunrgbd": [SunrgbdDetectionDataset, SunrgbdDatasetConfig],
+    "kitti": [KITTIDetectionDataset, KITTIDatasetConfig],
 }
 
 

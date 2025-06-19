@@ -9,7 +9,8 @@ import numpy as np
 # replace with actual path if this does not work
 np_include_path = np.__file__.replace("__init__.py", "core/include/")
 INCLUDE_PATH = [
-np_include_path
+    np_include_path, 
+    np.get_include()
 ]
 
 setup(

@@ -12,6 +12,7 @@ def save_checkpoint(
     epoch,
     args,
     best_val_metrics,
+    best_val_metrics_50 = {},
     filename=None,
 ):
     if not is_primary():
@@ -26,6 +27,7 @@ def save_checkpoint(
         "epoch": epoch,
         "args": args,
         "best_val_metrics": best_val_metrics,
+        "best_val_metrics_50": best_val_metrics_50,
     }
     torch.save(sd, checkpoint_name)
 
@@ -38,16 +40,18 @@ def resume_if_possible(checkpoint_dir, model_no_ddp, optimizer):
     """
     epoch = -1
     best_val_metrics = {}
+    best_val_metrics_50 = {}
     if not os.path.isdir(checkpoint_dir):
-        return epoch, best_val_metrics
+        return epoch, best_val_metrics, best_val_metrics_50
 
     last_checkpoint = os.path.join(checkpoint_dir, "checkpoint.pth")
     if not os.path.isfile(last_checkpoint):
-        return epoch, best_val_metrics
+        return epoch, best_val_metrics, best_val_metrics_50
 
-    sd = torch.load(last_checkpoint, map_location=torch.device("cpu"))
+    sd = torch.load(last_checkpoint, map_location=torch.device("cpu"), weights_only=False)
     epoch = sd["epoch"]
     best_val_metrics = sd["best_val_metrics"]
+    best_val_metrics_50 = sd.get("best_val_metrics_50", {})
     print(f"Found checkpoint at {epoch}. Resuming.")
 
     model_no_ddp.load_state_dict(sd["model"])
@@ -55,4 +59,4 @@ def resume_if_possible(checkpoint_dir, model_no_ddp, optimizer):
     print(
         f"Loaded model and optimizer state at {epoch}. Loaded best val metrics so far."
     )
-    return epoch, best_val_metrics
+    return epoch, best_val_metrics, best_val_metrics_50

@@ -126,15 +126,15 @@ def box3d_iou(corners1, corners2):
     todo (rqi): add more description on corner points' orders.
     """
     # corner points are in counter clockwise order
-    rect1 = [(corners1[i, 0], corners1[i, 2]) for i in range(3, -1, -1)]
-    rect2 = [(corners2[i, 0], corners2[i, 2]) for i in range(3, -1, -1)]
+    rect1 = [(corners1[i, 0], corners1[i, 1]) for i in range(3, -1, -1)]
+    rect2 = [(corners2[i, 0], corners2[i, 1]) for i in range(3, -1, -1)]
     area1 = poly_area(np.array(rect1)[:, 0], np.array(rect1)[:, 1])
     area2 = poly_area(np.array(rect2)[:, 0], np.array(rect2)[:, 1])
     inter, inter_area = convex_hull_intersection(rect1, rect2)
     iou_2d = inter_area / (area1 + area2 - inter_area)
-    ymax = min(corners1[0, 1], corners2[0, 1])
-    ymin = max(corners1[4, 1], corners2[4, 1])
-    inter_vol = inter_area * max(0.0, ymax - ymin)
+    zmax = min(corners1[4, 2], corners2[4, 2])
+    zmin = max(corners1[0, 2], corners2[0, 2])
+    inter_vol = inter_area * max(0.0, zmax - zmin)
     vol1 = box3d_vol(corners1)
     vol2 = box3d_vol(corners2)
     iou = inter_vol / (vol1 + vol2 - inter_vol)
@@ -231,6 +231,39 @@ def roty_batch(t):
     output[..., 1, 1] = 1
     output[..., 2, 0] = -s
     output[..., 2, 2] = c
+    return output
+
+
+def rotz_batch(t):
+    """Rotation about the z-axis.
+    t: (x1,x2,...xn)
+    return: (x1,x2,...,xn,3,3)
+    """
+    input_shape = t.shape
+    output = np.zeros(tuple(list(input_shape) + [3, 3]))
+    c = np.cos(t)
+    s = np.sin(t)
+    output[..., 0, 0] = c
+    output[..., 0, 1] = -s
+    output[..., 1, 0] = s
+    output[..., 1, 1] = c
+    output[..., 2, 2] = 1
+    return output
+
+
+def rotz_batch_tensor(t):
+    """Batch rotation about the z-axis."""
+    input_shape = t.shape
+    output = torch.zeros(
+        tuple(list(input_shape) + [3, 3]), dtype=torch.float32, device=t.device
+    )
+    c = torch.cos(t)
+    s = torch.sin(t)
+    output[..., 0, 0] = c
+    output[..., 0, 1] = -s
+    output[..., 1, 0] = s
+    output[..., 1, 1] = c
+    output[..., 2, 2] = 1
     return output
 
 
@@ -479,8 +512,8 @@ def enclosing_box3d_vol(corners1, corners2):
     corners1 = corners1.clone()
     corners2 = corners2.clone()
     # flip Y axis, since it is negative
-    corners1[:, :, :, 1] *= -1
-    corners2[:, :, :, 1] *= -1
+    # corners1[:, :, :, 1] *= -1
+    # corners2[:, :, :, 1] *= -1
 
     al_xmin = torch.min(
         torch.min(corners1[:, :, :, 0], dim=2).values[:, :, None],
@@ -541,21 +574,21 @@ def generalized_box3d_iou_tensor(
     _, K2 = corners2.shape[0], corners2.shape[1]
 
     # # box height. Y is negative, so max is torch.min
-    ymax = torch.min(corners1[:, :, 0, 1][:, :, None], corners2[:, :, 0, 1][:, None, :])
-    ymin = torch.max(corners1[:, :, 4, 1][:, :, None], corners2[:, :, 4, 1][:, None, :])
-    height = (ymax - ymin).clamp(min=0)
+    zmax = torch.min(corners1[:, :, 4, 2][:, :, None], corners2[:, :, 4, 2][:, None, :])
+    zmin = torch.max(corners1[:, :, 0, 2][:, :, None], corners2[:, :, 0, 2][:, None, :])
+    height = (zmax - zmin).clamp(min=0)
     EPS = 1e-8
 
     idx = torch.arange(start=3, end=-1, step=-1, device=corners1.device)
-    idx2 = torch.tensor([0, 2], dtype=torch.int64, device=corners1.device)
+    idx2 = torch.tensor([0, 1], dtype=torch.int64, device=corners1.device)
     rect1 = corners1[:, :, idx, :]
     rect2 = corners2[:, :, idx, :]
     rect1 = rect1[:, :, :, idx2]
     rect2 = rect2[:, :, :, idx2]
 
-    lt = torch.max(rect1[:, :, 1][:, :, None, :], rect2[:, :, 1][:, None, :, :])
-    rb = torch.min(rect1[:, :, 3][:, :, None, :], rect2[:, :, 3][:, None, :, :])
-    wh = (rb - lt).clamp(min=0)
+    lt = torch.min(rect1[:, :, 0][:, :, None, :], rect2[:, :, 0][:, None, :, :])
+    rb = torch.max(rect1[:, :, 2][:, :, None, :], rect2[:, :, 2][:, None, :, :])
+    wh = (lt - rb).clamp(min=0)
     non_rot_inter_areas = wh[:, :, :, 0] * wh[:, :, :, 1]
     non_rot_inter_areas = non_rot_inter_areas.view(B, K1, K2)
     if nums_k2 is not None:
@@ -648,21 +681,21 @@ def generalized_box3d_iou_cython(
     _, K2 = corners2.shape[0], corners2.shape[1]
 
     # # box height. Y is negative, so max is torch.min
-    ymax = torch.min(corners1[:, :, 0, 1][:, :, None], corners2[:, :, 0, 1][:, None, :])
-    ymin = torch.max(corners1[:, :, 4, 1][:, :, None], corners2[:, :, 4, 1][:, None, :])
-    height = (ymax - ymin).clamp(min=0)
+    zmax = torch.min(corners1[:, :, 4, 2][:, :, None], corners2[:, :, 4, 2][:, None, :])
+    zmin = torch.max(corners1[:, :, 0, 2][:, :, None], corners2[:, :, 0, 2][:, None, :])
+    height = (zmax - zmin).clamp(min=0)
     EPS = 1e-8
 
     idx = torch.arange(start=3, end=-1, step=-1, device=corners1.device)
-    idx2 = torch.tensor([0, 2], dtype=torch.int64, device=corners1.device)
+    idx2 = torch.tensor([0, 1], dtype=torch.int64, device=corners1.device)
     rect1 = corners1[:, :, idx, :]
     rect2 = corners2[:, :, idx, :]
     rect1 = rect1[:, :, :, idx2]
     rect2 = rect2[:, :, :, idx2]
 
-    lt = torch.max(rect1[:, :, 1][:, :, None, :], rect2[:, :, 1][:, None, :, :])
-    rb = torch.min(rect1[:, :, 3][:, :, None, :], rect2[:, :, 3][:, None, :, :])
-    wh = (rb - lt).clamp(min=0)
+    lt = torch.min(rect1[:, :, 0][:, :, None, :], rect2[:, :, 0][:, None, :, :])
+    rb = torch.max(rect1[:, :, 2][:, :, None, :], rect2[:, :, 2][:, None, :, :])
+    wh = (lt - rb).clamp(min=0)
     non_rot_inter_areas = wh[:, :, :, 0] * wh[:, :, :, 1]
     non_rot_inter_areas = non_rot_inter_areas.view(B, K1, K2)
     if nums_k2 is not None:
@@ -735,3 +768,12 @@ def generalized_box3d_iou(
             return generalized_box3d_iou_cython(
                 corners1, corners2, nums_k2, rotated_boxes, return_inter_vols_only
             )
+
+
+def filter_bboxes_low_points(point_cloud: np.ndarray, corners: np.ndarray, min_points: int = 100) -> np.ndarray:
+    mask = np.ones((corners.shape[0]), dtype=np.bool)
+    for idx in range(corners.shape[0]):
+        num_points = np.sum(extract_pc_in_box3d(point_cloud, corners[idx])[1])
+        if num_points < min_points:
+            mask[idx] = False
+    return mask

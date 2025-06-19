@@ -78,7 +78,6 @@ def train_one_epoch(
             batch_data_label[key] = batch_data_label[key].to(net_device)
 
         # Forward pass
-        optimizer.zero_grad()
         inputs = {
             "point_clouds": batch_data_label["point_clouds"],
             "point_cloud_dims_min": batch_data_label["point_cloud_dims_min"],
@@ -88,6 +87,7 @@ def train_one_epoch(
 
         # Compute loss
         loss, loss_dict = criterion(outputs, batch_data_label)
+        loss = loss / args.accumulation_steps
 
         loss_reduced = all_reduce_average(loss)
         loss_dict_reduced = reduce_dict(loss_dict)
@@ -97,9 +97,12 @@ def train_one_epoch(
             sys.exit(1)
 
         loss.backward()
-        if args.clip_gradient > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_gradient)
-        optimizer.step()
+
+        if (batch_idx + 1) % args.accumulation_steps == 0 or batch_idx + 1 == len(dataset_loader):
+            if args.clip_gradient > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_gradient)
+            optimizer.step()
+            optimizer.zero_grad()
 
         if curr_iter % args.log_metrics_every == 0:
             # This step is slow. AP is computed approximately and locally during training.
@@ -119,7 +122,7 @@ def train_one_epoch(
             eta_seconds = (max_iters - curr_iter) * time_delta.avg
             eta_str = str(datetime.timedelta(seconds=int(eta_seconds)))
             print(
-                f"Epoch [{curr_epoch}/{args.max_epoch}]; Iter [{curr_iter}/{max_iters}]; Loss {loss_avg.avg:0.2f}; LR {curr_lr:0.2e}; Iter time {time_delta.avg:0.2f}; ETA {eta_str}; Mem {mem_mb:0.2f}MB"
+                f"Epoch [{curr_epoch}/{args.max_epoch}]; Iter [{curr_iter}/{max_iters}]; Loss {loss_avg.avg:0.2f}; LR {curr_lr}; Iter time {time_delta.avg:0.2f}; ETA {eta_str}; Mem {mem_mb:0.2f}MB"
             )
             logger.log_scalars(loss_dict_reduced, curr_iter, prefix="Train_details/")
 
@@ -151,7 +154,7 @@ def evaluate(
     # ap calculator is exact for evaluation. This is slower than the ap calculator used during training.
     ap_calculator = APCalculator(
         dataset_config=dataset_config,
-        ap_iou_thresh=[0.25, 0.5],
+        ap_iou_thresh=[0.25, 0.5, 0.7],
         class2type_map=dataset_config.class2type,
         exact_eval=True,
     )

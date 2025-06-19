@@ -94,19 +94,23 @@ def eval_det_cls(
 
     # construct dets
     image_ids = []
+    bbox_index = []
     confidence = []
     BB = []
     for img_id in pred.keys():
-        for box, score in pred[img_id]:
+        for idx, box, score in pred[img_id]:
+            bbox_index.append(idx)
             image_ids.append(img_id)
             confidence.append(score)
             BB.append(box)
+    bbox_index = np.array(bbox_index)
     confidence = np.array(confidence)
     BB = np.array(BB)  # (nd,4 or 8,3 or 6)
 
     # sort by confidence
     sorted_ind = np.argsort(-confidence)
     sorted_scores = np.sort(-confidence)
+    bbox_index = bbox_index[sorted_ind]
     BB = BB[sorted_ind, ...]
     image_ids = [image_ids[x] for x in sorted_ind]
 
@@ -114,6 +118,7 @@ def eval_det_cls(
     nd = len(image_ids)
     tp = np.zeros(nd)
     fp = np.zeros(nd)
+    ious = {}
     for d in range(nd):
         # if d%100==0: print(d)
         R = class_recs[image_ids[d]]
@@ -129,7 +134,6 @@ def eval_det_cls(
                     ovmax = iou
                     jmax = j
 
-        # print d, ovmax
         if ovmax > ovthresh:
             if not R["det"][jmax]:
                 tp[d] = 1.0
@@ -138,6 +142,9 @@ def eval_det_cls(
                 fp[d] = 1.0
         else:
             fp[d] = 1.0
+        if image_ids[d] not in ious:
+            ious[image_ids[d]] = []
+        ious[image_ids[d]].append((bbox_index[d], ovmax))
 
     # compute precision recall
     fp = np.cumsum(fp)
@@ -152,13 +159,13 @@ def eval_det_cls(
     prec = tp / np.maximum(tp + fp, np.finfo(np.float64).eps)
     ap = voc_ap(rec, prec, use_07_metric)
 
-    return rec, prec, ap
+    return rec, prec, ap, ious
 
 
 def eval_det_cls_wrapper(arguments):
     pred, gt, ovthresh, use_07_metric, get_iou_func = arguments
-    rec, prec, ap = eval_det_cls(pred, gt, ovthresh, use_07_metric, get_iou_func)
-    return (rec, prec, ap)
+    rec, prec, ap, ious = eval_det_cls(pred, gt, ovthresh, use_07_metric, get_iou_func)
+    return (rec, prec, ap, ious)
 
 
 def eval_det(pred_all, gt_all, ovthresh=0.25, use_07_metric=False, get_iou_func=None):
@@ -229,7 +236,7 @@ def eval_det_multiprocessing(
     pred = {}  # map {classname: pred}
     gt = {}  # map {classname: gt}
     for img_id in pred_all.keys():
-        for classname, bbox, score in pred_all[img_id]:
+        for idx, (classname, bbox, score, _) in enumerate(pred_all[img_id]):
             if classname not in pred:
                 pred[classname] = {}
             if img_id not in pred[classname]:
@@ -238,7 +245,7 @@ def eval_det_multiprocessing(
                 gt[classname] = {}
             if img_id not in gt[classname]:
                 gt[classname][img_id] = []
-            pred[classname][img_id].append((bbox, score))
+            pred[classname][img_id].append((idx, bbox, score))
     for img_id in gt_all.keys():
         for classname, bbox in gt_all[img_id]:
             if classname not in gt:
@@ -260,13 +267,18 @@ def eval_det_multiprocessing(
         ],
     )
     p.close()
+    
     for i, classname in enumerate(gt.keys()):
+        # Update predictions with respective IOU values
+        ious = ret_values[i][3]
+        for img_id in ious:
+            for bbox_idx, iou in ious[img_id]:
+                pred_all[img_id][bbox_idx][3] = iou
         if classname in pred:
-            rec[classname], prec[classname], ap[classname] = ret_values[i]
+            rec[classname], prec[classname], ap[classname] = ret_values[i][:3]
         else:
             rec[classname] = 0
             prec[classname] = 0
             ap[classname] = 0
         # print(classname, ap[classname])
-
     return rec, prec, ap

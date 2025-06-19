@@ -9,3 +9,12 @@ utils/build/*
 
 # outputs
 outputs/
+
+*env/
+weights/
+
+checkpoints*/
+predictions*/
+runs/
+mlruns/
+mlartifacts/
